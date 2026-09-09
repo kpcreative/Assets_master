@@ -1,0 +1,1 @@
+ID,scanRun_ID,rule_ID,companyCode,masterFixedAsset,fixedAsset,assetDescription,assetClass,creationDate,acquisitionValueDate,assetCapitalizationDate,assetDeactivationDate,daysSinceCreation,triggeringFieldsSummary,reviewStatus,reviewedBy,reviewedAt,reviewComment,approvedBy,approvedAt,writeBackStatus,writeBackTimestamp,writeBackSapResponse

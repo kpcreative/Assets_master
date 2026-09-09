@@ -1,0 +1,45 @@
+{
+  "xsappname": "asset-master-cleanup-cap",
+  "tenant-mode": "dedicated",
+  "description": "Asset Master Data Governance App — Fixed Asset monitoring, approval workflow, and S/4HANA write-back",
+  "scopes": [
+    {
+      "name": "$XSAPPNAME.viewer",
+      "description": "View flagged assets, scan runs, audit log"
+    },
+    {
+      "name": "$XSAPPNAME.reviewer",
+      "description": "Submit recommendations on flagged assets"
+    },
+    {
+      "name": "$XSAPPNAME.approver",
+      "description": "Approve or reject recommendations and execute S/4HANA write-back"
+    }
+  ],
+  "attributes": [],
+  "role-templates": [
+    {
+      "name": "AssetViewer",
+      "description": "Read-only access — can view flagged assets, scan results, and audit log",
+      "scope-references": ["$XSAPPNAME.viewer"]
+    },
+    {
+      "name": "AssetAccountant",
+      "description": "Asset Accountant — can view and submit recommendations on flagged assets",
+      "scope-references": ["$XSAPPNAME.viewer", "$XSAPPNAME.reviewer"]
+    },
+    {
+      "name": "FinanceManager",
+      "description": "Finance Manager — can approve/reject recommendations and execute S/4HANA write-back",
+      "scope-references": ["$XSAPPNAME.viewer", "$XSAPPNAME.reviewer", "$XSAPPNAME.approver"]
+    }
+  ],
+  "oauth2-configuration": {
+    "token-validity": 900,
+    "refresh-token-validity": 1800,
+    "redirect-uris": [
+      "https://*.hana.ondemand.com/**",
+      "https://*.cfapps.eu10-005.hana.ondemand.com/**"
+    ]
+  }
+}

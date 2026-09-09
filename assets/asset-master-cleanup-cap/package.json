@@ -1,0 +1,49 @@
+{
+  "name": "asset-master-cleanup-cap",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@cap-js/hana": "^3",
+    "@sap/cds": "^10",
+    "@sap/xssec": "^4",
+    "undici": "^8.10.0"
+  },
+  "devDependencies": {
+    "@cap-js/cds-test": "^1.0.2",
+    "@cap-js/sqlite": "^3",
+    "@sap/cds-dk": "^10.0.7",
+    "jest": "^30.4.2"
+  },
+  "scripts": {
+    "start": "cds-serve",
+    "build": "npm run build --workspace=app/react-ui && cds build --production && node -e \"const{cpSync}=require('fs');cpSync('app/react-ui/dist','gen/srv/app',{recursive:true,force:true});console.log('Copied React dist -> gen/srv/app');\"",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest --testEnvironment node --forceExit --coverage"
+  },
+  "private": true,
+  "cds": {
+    "[development]": {
+      "requires": {
+        "auth": "dummy"
+      }
+    },
+    "[production]": {
+      "folders": {
+        "app": "app"
+      },
+      "requires": {
+        "auth": {
+          "kind": "xsuaa"
+        }
+      }
+    }
+  },
+  "jest": {
+    "reporters": [
+      "default",
+      "<rootDir>/scripts/test-report-reporter.cjs"
+    ]
+  },
+  "workspaces": [
+    "app/react-ui"
+  ]
+}

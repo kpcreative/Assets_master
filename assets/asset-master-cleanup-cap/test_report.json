@@ -1,0 +1,162 @@
+{
+  "summary": {
+    "total": 28,
+    "passed": 28,
+    "failed": 0,
+    "score": 100,
+    "coverage": 50.21
+  },
+  "sections": [
+    {
+      "name": "CAP Tests",
+      "marker": "cap_tests",
+      "total": 28,
+      "passed": 28,
+      "failed": 0,
+      "skipped": 0,
+      "score": 100,
+      "tests": [
+        {
+          "name": "triggerScan creates a ScanRun record and returns a scanRunId",
+          "outcome": "passed",
+          "duration": 0.038
+        },
+        {
+          "name": "triggerScan writes an audit log entry for the scan run",
+          "outcome": "passed",
+          "duration": 0.013
+        },
+        {
+          "name": "submitRecommendation sets reviewStatus to RECOMMENDED_DELETE for a PENDING asset",
+          "outcome": "passed",
+          "duration": 0.006
+        },
+        {
+          "name": "submitRecommendation rejects invalid action value with 400",
+          "outcome": "passed",
+          "duration": 0.004
+        },
+        {
+          "name": "submitRecommendation rejects when asset is not in PENDING status with 404",
+          "outcome": "passed",
+          "duration": 0.004
+        },
+        {
+          "name": "submitRecommendation writes an ASSET_REVIEWED audit log entry",
+          "outcome": "passed",
+          "duration": 0.004
+        },
+        {
+          "name": "approveAction transitions RECOMMENDED_DELETE → APPROVED",
+          "outcome": "passed",
+          "duration": 0.005
+        },
+        {
+          "name": "approveAction transitions RECOMMENDED_BLOCK → APPROVED",
+          "outcome": "passed",
+          "duration": 0.004
+        },
+        {
+          "name": "approveAction rejects when asset is in PENDING status with 404",
+          "outcome": "passed",
+          "duration": 0.004
+        },
+        {
+          "name": "executeApprovedActions marks asset as EXECUTED with writeBackStatus SUCCESS",
+          "outcome": "passed",
+          "duration": 0.007
+        },
+        {
+          "name": "executeApprovedActions returns 0 executed for empty flaggedAssetIds list",
+          "outcome": "passed",
+          "duration": 0
+        },
+        {
+          "name": "executeApprovedActions skips PENDING assets — only APPROVED are executed",
+          "outcome": "passed",
+          "duration": 0.004
+        },
+        {
+          "name": "daysSince returns 0 for null",
+          "outcome": "passed",
+          "duration": 0.002
+        },
+        {
+          "name": "daysSince returns approximately correct days for a past date",
+          "outcome": "passed",
+          "duration": 0.001
+        },
+        {
+          "name": "evaluateFieldCondition IS_EMPTY: returns true when mapped field is null",
+          "outcome": "passed",
+          "duration": 0
+        },
+        {
+          "name": "evaluateFieldCondition IS_EMPTY: returns false when mapped field has a value",
+          "outcome": "passed",
+          "duration": 0
+        },
+        {
+          "name": "evaluateFieldCondition IS_NOT_EMPTY: returns true when field has a value",
+          "outcome": "passed",
+          "duration": 0.001
+        },
+        {
+          "name": "evaluateFieldCondition CONTAINS_KEYWORD: returns true for case-insensitive match",
+          "outcome": "passed",
+          "duration": 0
+        },
+        {
+          "name": "evaluateFieldCondition CONTAINS_KEYWORD: returns false when keyword absent",
+          "outcome": "passed",
+          "duration": 0
+        },
+        {
+          "name": "evaluateFieldCondition unknown conditionType returns false",
+          "outcome": "passed",
+          "duration": 0.001
+        },
+        {
+          "name": "evaluateRule not triggered when asset is younger than threshold",
+          "outcome": "passed",
+          "duration": 0
+        },
+        {
+          "name": "evaluateRule triggered when asset is older than threshold AND all conditions match",
+          "outcome": "passed",
+          "duration": 0.001
+        },
+        {
+          "name": "evaluateRule not triggered when only some conditions match (AND logic)",
+          "outcome": "passed",
+          "duration": 0
+        },
+        {
+          "name": "evaluateRule triggered by CONTAINS_KEYWORD condition",
+          "outcome": "passed",
+          "duration": 0
+        },
+        {
+          "name": "evaluateAsset returns empty violations for healthy asset (all dates set)",
+          "outcome": "passed",
+          "duration": 0
+        },
+        {
+          "name": "evaluateAsset returns violations when asset violates a rule",
+          "outcome": "passed",
+          "duration": 0
+        },
+        {
+          "name": "evaluateAsset skips inactive rules",
+          "outcome": "passed",
+          "duration": 0
+        },
+        {
+          "name": "evaluateAsset asset newer than threshold is not flagged even when fields empty",
+          "outcome": "passed",
+          "duration": 0
+        }
+      ]
+    }
+  ]
+}

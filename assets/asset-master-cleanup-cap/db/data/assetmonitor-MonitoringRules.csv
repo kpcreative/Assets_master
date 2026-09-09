@@ -1,0 +1,3 @@
+ID,name,description,isActive,targetTable,ageDaysThreshold,createdAt,createdBy,modifiedAt,modifiedBy
+r1000000-0000-0000-0000-000000000001,Uncapitalized Assets (>90 days),Flags assets created more than 90 days ago with no acquisition or capitalization date set — likely never put into service.,true,ANLA,90,2024-01-15T08:00:00Z,admin,2024-01-15T08:00:00Z,admin
+r1000000-0000-0000-0000-000000000002,Dummy or Test Asset Names,Flags assets whose description contains test or placeholder keywords suggesting they were created for testing and never cleaned up.,true,ANLA,30,2024-01-15T08:05:00Z,admin,2024-01-15T08:05:00Z,admin
