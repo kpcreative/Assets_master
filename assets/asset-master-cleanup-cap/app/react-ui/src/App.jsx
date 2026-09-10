@@ -4,7 +4,7 @@ import Rules from './pages/Rules'
 import Approvals from './pages/Approvals'
 import AuditLog from './pages/AuditLog'
 import Settings from './pages/Settings'
-import { fetchFlaggedAssets } from './api/client'
+import { fetchFlaggedAssets, fetchCurrentUser } from './api/client'
 
 const NAV = [
   { key: 'dashboard', label: 'Dashboard',   icon: '▣' },
@@ -25,6 +25,7 @@ const PAGES = {
 export default function App() {
   const [page, setPage] = useState('dashboard')
   const [pendingCount, setPendingCount] = useState(0)
+  const [user, setUser] = useState({ name: '', initials: '…', isAdmin: false })
 
   const refreshBadge = () => {
     fetchFlaggedAssets()
@@ -39,6 +40,19 @@ export default function App() {
 
   useEffect(() => { refreshBadge() }, [page])
 
+  useEffect(() => {
+    fetchCurrentUser()
+      .then(u => setUser(u))
+      .catch(() => setUser({ name: 'SAP Demo User', initials: 'U', isAdmin: false }))
+  }, [])
+
+  // Non-admins cannot open the Approvals page — bounce them to the dashboard
+  useEffect(() => {
+    if (!user.isAdmin && page === 'approvals') setPage('dashboard')
+  }, [user.isAdmin, page])
+
+  const visibleNav = NAV.filter(n => n.key !== 'approvals' || user.isAdmin)
+
   const Page = PAGES[page]
 
   return (
@@ -50,15 +64,15 @@ export default function App() {
         </div>
         <div className="header-spacer" />
         <div className="header-user">
-          <span>SAP Demo User</span>
-          <div className="user-avatar">U</div>
+          <span>{user.name}</span>
+          <div className="user-avatar">{user.initials}</div>
         </div>
       </header>
 
       <div className="app-body">
         <nav className="sidebar">
           <div className="sidebar-section-title">Navigation</div>
-          {NAV.map(({ key, label, icon }) => (
+          {visibleNav.map(({ key, label, icon }) => (
             <button
               key={key}
               className={`sidebar-item${page === key ? ' active' : ''}`}
@@ -74,7 +88,7 @@ export default function App() {
         </nav>
 
         <main className="content">
-          <Page onNavigate={setPage} onBadgeRefresh={refreshBadge} />
+          <Page onNavigate={setPage} onBadgeRefresh={refreshBadge} isAdmin={user.isAdmin} />
         </main>
       </div>
     </div>

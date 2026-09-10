@@ -1,25 +1,54 @@
 import { useState, useEffect, useCallback } from 'react'
 import * as api from '../api/client'
 
-export default function Settings() {
+export default function Settings({ isAdmin }) {
   const [recipients, setRecipients] = useState([])
   const [loading,    setLoading]    = useState(true)
   const [showDialog, setShowDialog] = useState(false)
   const [form,       setForm]       = useState({ email: '', role: 'ASSET_ACCOUNTANT', isActive: true })
   const [alert,      setAlert]      = useState(null)
+  const [admins,     setAdmins]     = useState([])
+  const [adminEmail, setAdminEmail] = useState('')
 
   const loadData = useCallback(async () => {
     setLoading(true)
     try {
       setRecipients(await api.fetchAlertRecipients())
+      if (isAdmin) {
+        try { setAdmins(await api.fetchAdmins()) } catch { /* non-admin or unavailable */ }
+      }
     } catch (e) {
       setAlert({ type: 'error', msg: e.message })
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [isAdmin])
 
   useEffect(() => { loadData() }, [loadData])
+
+  const handleAddAdmin = async () => {
+    const email = adminEmail.trim().toLowerCase()
+    if (!email) return
+    try {
+      await api.addAdmin(email)
+      setAdminEmail('')
+      setAdmins(await api.fetchAdmins())
+      setAlert({ type: 'success', msg: `Admin added: ${email}` })
+    } catch (e) {
+      setAlert({ type: 'error', msg: e.message })
+    }
+  }
+
+  const handleRemoveAdmin = async (email) => {
+    if (!window.confirm(`Remove admin access for ${email}?`)) return
+    try {
+      await api.removeAdmin(email)
+      setAdmins(await api.fetchAdmins())
+      setAlert({ type: 'success', msg: `Admin removed: ${email}` })
+    } catch (e) {
+      setAlert({ type: 'error', msg: e.message })
+    }
+  }
 
   const handleCreate = async () => {
     try {
@@ -54,7 +83,9 @@ export default function Settings() {
           <div className="page-title">Alert Recipients</div>
           <div className="page-subtitle">Configure who receives email notifications for scans and approvals</div>
         </div>
-        <button className="btn btn-primary" onClick={() => setShowDialog(true)}>+ Add Recipient</button>
+        {isAdmin && (
+          <button className="btn btn-primary" onClick={() => setShowDialog(true)}>+ Add Recipient</button>
+        )}
       </div>
 
       {alert && (
@@ -114,7 +145,9 @@ export default function Settings() {
                     </span>
                   </td>
                   <td>
-                    <button className="btn btn-danger btn-sm" onClick={() => handleDelete(r.ID)}>Remove</button>
+                    {isAdmin && (
+                      <button className="btn btn-danger btn-sm" onClick={() => handleDelete(r.ID)}>Remove</button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -122,6 +155,62 @@ export default function Settings() {
           </table>
         </div>
       </div>
+
+      {isAdmin && (
+        <div className="card">
+          <div className="card-header">
+            <span className="card-title">Administrators ({admins.length})</span>
+          </div>
+          <div style={{ padding: '14px 18px' }}>
+            <p style={{ fontSize: 13, color: '#475569', marginBottom: 12, lineHeight: 1.6 }}>
+              Admins can approve/reject recommendations, execute write-back, manage recipients, and manage this list.
+              A user's login email is matched against these entries.
+            </p>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+              <input
+                className="form-input"
+                type="email"
+                value={adminEmail}
+                onChange={e => setAdminEmail(e.target.value)}
+                placeholder="admin.email@company.com"
+                style={{ maxWidth: 320 }}
+                onKeyDown={e => { if (e.key === 'Enter') handleAddAdmin() }}
+              />
+              <button className="btn btn-primary" onClick={handleAddAdmin} disabled={!adminEmail.trim()}>
+                Add Admin
+              </button>
+            </div>
+            <div className="table-container">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Email Address</th>
+                    <th>Added By</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {admins.length === 0 ? (
+                    <tr><td colSpan={3} className="table-empty">No administrators configured</td></tr>
+                  ) : admins.map(a => (
+                    <tr key={a.email}>
+                      <td style={{ fontWeight: 500 }}>{a.email}</td>
+                      <td className="muted">{a.addedBy || '—'}</td>
+                      <td>
+                        {a.addedBy === 'system (permanent)' ? (
+                          <span className="muted" style={{ fontSize: 12.5 }}>Permanent</span>
+                        ) : (
+                          <button className="btn btn-danger btn-sm" onClick={() => handleRemoveAdmin(a.email)}>Remove</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <div className="card-header">

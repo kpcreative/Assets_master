@@ -87,3 +87,15 @@ export const createRecipient = (data) =>
 
 export const deleteRecipient = (id) =>
   apiFetch('DELETE', `/AlertRecipients(${id})`)
+
+export const fetchCurrentUser = () =>
+  apiFetch('GET', '/currentUser()')
+
+export const fetchAdmins = () =>
+  getList('/listAdmins()')
+
+export const addAdmin = (email) =>
+  action('/addAdmin', { email })
+
+export const removeAdmin = (email) =>
+  action('/removeAdmin', { email })

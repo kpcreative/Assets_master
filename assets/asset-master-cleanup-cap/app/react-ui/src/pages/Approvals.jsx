@@ -32,7 +32,7 @@ function parseProcedureText(raw) {
   }
 }
 
-export default function Approvals({ onBadgeRefresh }) {
+export default function Approvals({ onBadgeRefresh, isAdmin }) {
   const [assets,    setAssets]    = useState([])
   const [loading,   setLoading]   = useState(true)
   const [tab,       setTab]       = useState('pending')
@@ -143,6 +143,23 @@ export default function Approvals({ onBadgeRefresh }) {
   }
 
   const massExecuteIds = [...selected].filter(id => assets.find(a => a.ID === id)?.reviewStatus === 'APPROVED')
+
+  if (!isAdmin) {
+    return (
+      <div>
+        <div className="page-header">
+          <div>
+            <div className="page-title">Approval Queue</div>
+          </div>
+        </div>
+        <div className="card">
+          <div style={{ padding: '28px 20px', textAlign: 'center', color: '#64748b', fontSize: 14 }}>
+            You don't have access to the Approval Queue. This page is available to administrators only.
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div>

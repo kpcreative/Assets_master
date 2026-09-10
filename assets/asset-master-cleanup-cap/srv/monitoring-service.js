@@ -4,10 +4,22 @@ import * as emailService   from './email-service.js';
 
 const VALID_ACTIONS = ['RECOMMENDED_BLOCK', 'RECOMMENDED_DELETE', 'RECOMMENDED_KEEP'];
 
+// Permanent bootstrap admin(s). Always treated as admin, independent of the
+// AdminUsers table, so the first owner can never be locked out even if the DB
+// seed fails to run. These entries cannot be removed via the UI.
+const BOOTSTRAP_ADMINS = ['kartik.pandey@sap.com'];
+
 export default class MonitoringService extends cds.ApplicationService {
 
   async init() {
     const { MonitoringRules, ScanRuns, FlaggedAssets, AuditLog, AlertRecipients } = this.entities;
+    // AdminUsers lives in the db model only (not projected into the service) — reference by name
+    const AdminUsers = 'assetmonitor.AdminUsers';
+
+    // Only admins may add/remove/change alert recipients (reads stay open)
+    this.before(['CREATE', 'UPDATE', 'DELETE'], AlertRecipients, async (req) => {
+      if (!(await this._isAdmin(req))) return req.reject(403, 'Admin privilege required');
+    });
 
     // -----------------------------------------------------------------------
     // triggerScan — starts a full on-demand scan
@@ -104,6 +116,7 @@ export default class MonitoringService extends cds.ApplicationService {
     // approveAction — Finance Manager approves a single recommendation
     // -----------------------------------------------------------------------
     this.on('approveAction', async (req) => {
+      if (!(await this._isAdmin(req))) return req.reject(403, 'Admin privilege required');
       const { flaggedAssetId } = req.data;
       const user = req.user?.id || 'anonymous';
 
@@ -123,6 +136,7 @@ export default class MonitoringService extends cds.ApplicationService {
     // rejectAction — Finance Manager rejects a recommendation
     // -----------------------------------------------------------------------
     this.on('rejectAction', async (req) => {
+      if (!(await this._isAdmin(req))) return req.reject(403, 'Admin privilege required');
       const { flaggedAssetId, reason } = req.data;
       const user = req.user?.id || 'anonymous';
 
@@ -141,6 +155,7 @@ export default class MonitoringService extends cds.ApplicationService {
     // massApproveActions — Finance Manager bulk-approves
     // -----------------------------------------------------------------------
     this.on('massApproveActions', async (req) => {
+      if (!(await this._isAdmin(req))) return req.reject(403, 'Admin privilege required');
       const { flaggedAssetIds } = req.data;
       const user = req.user?.id || 'anonymous';
 
@@ -166,6 +181,7 @@ export default class MonitoringService extends cds.ApplicationService {
     // executeApprovedActions — Triggers S/4HANA write-back
     // -----------------------------------------------------------------------
     this.on('executeApprovedActions', async (req) => {
+      if (!(await this._isAdmin(req))) return req.reject(403, 'Admin privilege required');
       const { flaggedAssetIds } = req.data;
       const user = req.user?.id || 'anonymous';
 
@@ -252,6 +268,7 @@ export default class MonitoringService extends cds.ApplicationService {
     // massResetToPending — resets EXECUTED/FAILED assets back to PENDING
     // -----------------------------------------------------------------------
     this.on('massResetToPending', async (req) => {
+      if (!(await this._isAdmin(req))) return req.reject(403, 'Admin privilege required');
       const { flaggedAssetIds } = req.data;
       const user = req.user?.id || 'anonymous';
 
@@ -287,6 +304,67 @@ export default class MonitoringService extends cds.ApplicationService {
       return { reset };
     });
 
+    // -----------------------------------------------------------------------
+    // currentUser — returns authenticated user info for the header
+    // -----------------------------------------------------------------------
+    this.on('currentUser', async (req) => {
+      const u = req.user || {};
+      const id    = u.id    || 'anonymous';
+      const email = u.email || '';
+      const name  = u.name  || u.email || u.id || 'SAP User';
+
+      const parts    = name.split(/[\s@]+/).filter(Boolean);
+      const initials = parts.length >= 2
+        ? (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+        : name.slice(0, 2).toUpperCase();
+
+      const isAdmin = await this._isAdmin(req);
+
+      return { id, name, email, initials, isAdmin };
+    });
+
+    // -----------------------------------------------------------------------
+    // listAdmins / addAdmin / removeAdmin — manage the admin allowlist
+    // -----------------------------------------------------------------------
+    this.on('listAdmins', async (req) => {
+      if (!(await this._isAdmin(req))) return req.reject(403, 'Admin privilege required');
+      const rows = await SELECT.from(AdminUsers).orderBy({ addedAt: 'asc' });
+      const present = new Set(rows.map(r => r.email));
+      // Surface permanent bootstrap admins that aren't (yet) in the table
+      const bootstrap = BOOTSTRAP_ADMINS
+        .filter(e => !present.has(e))
+        .map(e => ({ email: e, addedBy: 'system (permanent)', addedAt: null }));
+      return [...bootstrap, ...rows];
+    });
+
+    this.on('addAdmin', async (req) => {
+      if (!(await this._isAdmin(req))) return req.reject(403, 'Admin privilege required');
+      const email = (req.data.email || '').trim().toLowerCase();
+      if (!email || !email.includes('@')) return req.reject(400, 'A valid email address is required');
+
+      const exists = await SELECT.one.from(AdminUsers).where({ email });
+      if (!exists) {
+        await INSERT.into(AdminUsers).entries({ email, addedBy: this._adminEmails(req)[0] || 'system', addedAt: new Date() });
+        await this._writeAudit({ eventType: 'ADMIN_ADDED', performedBy: this._adminEmails(req)[0] || 'system', entityType: 'AdminUser', entityId: email, details: `Admin added: ${email}` });
+      }
+      return { success: true };
+    });
+
+    this.on('removeAdmin', async (req) => {
+      if (!(await this._isAdmin(req))) return req.reject(403, 'Admin privilege required');
+      const email = (req.data.email || '').trim().toLowerCase();
+
+      if (BOOTSTRAP_ADMINS.includes(email)) return req.reject(400, 'This is a permanent admin and cannot be removed');
+
+      const all = await SELECT.from(AdminUsers).columns('email');
+      if (all.length <= 1) return req.reject(400, 'Cannot remove the last remaining admin');
+      if (!all.some(a => a.email === email)) return req.reject(404, 'Admin not found');
+
+      await DELETE.from(AdminUsers).where({ email });
+      await this._writeAudit({ eventType: 'ADMIN_REMOVED', performedBy: this._adminEmails(req)[0] || 'system', entityType: 'AdminUser', entityId: email, details: `Admin removed: ${email}` });
+      return { success: true };
+    });
+
     // One-time purge of demo seed data — idempotent (no-op if already gone)
     cds.on('served', async () => {
       try {
@@ -302,6 +380,20 @@ export default class MonitoringService extends cds.ApplicationService {
       } catch (e) {
         cds.log('monitoring-service').warn('Seed purge skipped: %s', e.message);
       }
+
+      // Seed the initial admin (idempotent) — works in both sqlite (dev) and HANA (prod)
+      try {
+        const { AdminUsers } = cds.entities('assetmonitor');
+        const db = await cds.connect.to('db');
+        const seed = 'kartik.pandey@sap.com';
+        const exists = await db.run(SELECT.one.from(AdminUsers).where({ email: seed }));
+        if (!exists) {
+          await db.run(INSERT.into(AdminUsers).entries({ email: seed, addedBy: 'system-seed', addedAt: new Date() }));
+          cds.log('monitoring-service').info('Seeded initial admin: %s', seed);
+        }
+      } catch (e) {
+        cds.log('monitoring-service').warn('Admin seed skipped: %s', e.message);
+      }
     });
 
     return super.init();
@@ -310,6 +402,31 @@ export default class MonitoringService extends cds.ApplicationService {
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
+
+  /** Candidate login identifiers for the caller, lowercased. */
+  _adminEmails(req) {
+    return [req.user?.email, req.user?.id, req.user?.name]
+      .filter(Boolean)
+      .map(s => String(s).trim().toLowerCase());
+  }
+
+  /** True if the caller's email/id is in the AdminUsers allowlist.
+   *  In dummy/mocked auth (local dev) everyone is admin so the full UI is testable. */
+  async _isAdmin(req) {
+    const authCfg = cds.env.requires?.auth;
+    const kind = typeof authCfg === 'string' ? authCfg : authCfg?.kind;
+    if (kind === 'dummy' || kind === 'mocked') return true;
+
+    const candidates = this._adminEmails(req);
+    if (!candidates.length) return false;
+
+    // Permanent bootstrap owner — always admin, even if the DB seed never ran
+    if (candidates.some(c => BOOTSTRAP_ADMINS.includes(c))) return true;
+
+    const AdminUsers = 'assetmonitor.AdminUsers';
+    const hit = await SELECT.one.from(AdminUsers).where({ email: { in: candidates } });
+    return !!hit;
+  }
 
   async _writeAudit({ eventType, performedBy, entityType, entityId, details }) {
     const { AuditLog } = this.entities;

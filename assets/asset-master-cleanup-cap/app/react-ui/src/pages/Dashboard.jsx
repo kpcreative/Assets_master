@@ -79,7 +79,7 @@ function fmtDate(s) {
   return new Date(s).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
 }
 
-export default function Dashboard({ onBadgeRefresh }) {
+export default function Dashboard({ onBadgeRefresh, isAdmin }) {
   const [assets,   setAssets]   = useState([])
   const [scanRuns, setScanRuns] = useState([])
   const [loading,  setLoading]  = useState(true)
@@ -396,10 +396,12 @@ export default function Dashboard({ onBadgeRefresh }) {
                 disabled={pendingSelected.length === 0}>
                 Submit Recommendation ({pendingSelected.length} pending)
               </button>
-              <button className="btn btn-outline btn-sm" onClick={handleResubmitRejected}
-                disabled={rejectedSelected.length === 0}>
-                Resubmit to Pending ({rejectedSelected.length} rejected)
-              </button>
+              {isAdmin && (
+                <button className="btn btn-outline btn-sm" onClick={handleResubmitRejected}
+                  disabled={rejectedSelected.length === 0}>
+                  Resubmit to Pending ({rejectedSelected.length} rejected)
+                </button>
+              )}
               <button className="btn btn-outline btn-sm" onClick={() => setSelected(new Set())}>Clear</button>
             </div>
 
@@ -559,9 +561,11 @@ export default function Dashboard({ onBadgeRefresh }) {
 
             <div className={`table-toolbar${selectedHistory.size === 0 ? ' hidden' : ''}`}>
               <span>{selectedHistory.size} row{selectedHistory.size !== 1 ? 's' : ''} selected</span>
-              <button className="btn btn-warning btn-sm" onClick={handleResetToPending}>
-                Reset to Pending ({selectedHistory.size})
-              </button>
+              {isAdmin && (
+                <button className="btn btn-warning btn-sm" onClick={handleResetToPending}>
+                  Reset to Pending ({selectedHistory.size})
+                </button>
+              )}
               <button className="btn btn-outline btn-sm" onClick={() => setSelectedHistory(new Set())}>Clear</button>
             </div>
 

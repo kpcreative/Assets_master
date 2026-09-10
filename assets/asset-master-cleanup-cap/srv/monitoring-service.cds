@@ -63,4 +63,26 @@ service MonitoringService @(path: '/monitoring') {
   action massResetToPending(
     flaggedAssetIds : array of UUID
   ) returns { reset: Integer };
+
+  /** Returns the currently authenticated user's display information */
+  function currentUser() returns {
+    id       : String(200);
+    name     : String(200);
+    email    : String(200);
+    initials : String(5);
+    isAdmin  : Boolean;
+  };
+
+  /** List all admin users (admin only) */
+  function listAdmins() returns array of {
+    email   : String(200);
+    addedBy : String(200);
+    addedAt : Timestamp;
+  };
+
+  /** Add an admin by email (admin only) */
+  action addAdmin(email: String) returns { success: Boolean };
+
+  /** Remove an admin by email (admin only) */
+  action removeAdmin(email: String) returns { success: Boolean };
 }

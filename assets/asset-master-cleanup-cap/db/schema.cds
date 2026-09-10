@@ -95,3 +95,12 @@ entity AlertRecipients : cuid {
   role     : String(30)  @mandatory;   // ASSET_ACCOUNTANT | FINANCE_MANAGER
   isActive : Boolean     default true;
 }
+
+// ---------------------------------------------------------------------------
+// Admin allowlist — matched against the logged-in user's email
+// ---------------------------------------------------------------------------
+entity AdminUsers {
+  key email : String(200);
+  addedBy   : String(200);
+  addedAt   : Timestamp;
+}
