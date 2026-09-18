@@ -99,3 +99,6 @@ export const addAdmin = (email) =>
 
 export const removeAdmin = (email) =>
   action('/removeAdmin', { email })
+
+export const aiDiagnoseError = (flaggedAssetId) =>
+  action('/aiDiagnoseError', { flaggedAssetId }).then(r => r?.text || '')

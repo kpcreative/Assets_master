@@ -1,8 +1,10 @@
 import * as s4Integration from './s4-integration.js';
 import { runScan }         from './rule-engine.js';
 import * as emailService   from './email-service.js';
+import * as aiWriter       from './ai-email-writer.js';
 
 const VALID_ACTIONS = ['RECOMMENDED_BLOCK', 'RECOMMENDED_DELETE', 'RECOMMENDED_KEEP'];
+const REC_STATUSES  = ['RECOMMENDED_BLOCK', 'RECOMMENDED_DELETE', 'RECOMMENDED_KEEP'];
 
 // Permanent bootstrap admin(s). Always treated as admin, independent of the
 // AdminUsers table, so the first owner can never be locked out even if the DB
@@ -81,6 +83,11 @@ export default class MonitoringService extends cds.ApplicationService {
 
       await this._writeAudit({ eventType: 'ASSET_REVIEWED', performedBy: user, entityType: 'FlaggedAsset', entityId: flaggedAssetId, details: `Status set to ${action}` });
 
+      // Non-KEEP recommendations require admin approval — batch them and email admins.
+      if (action !== 'RECOMMENDED_KEEP') {
+        await this._createBatchAndNotify([flaggedAssetId], user, req);
+      }
+
       return { success: true };
     });
 
@@ -97,17 +104,23 @@ export default class MonitoringService extends cds.ApplicationService {
       if (!flaggedAssetIds || flaggedAssetIds.length === 0) return { updated: 0 };
 
       let updated = 0;
+      const updatedIds = [];
       for (const id of flaggedAssetIds) {
         const n = await UPDATE(FlaggedAssets)
           .where({ ID: id, reviewStatus: 'PENDING' })
           .with({ reviewStatus: action, recommendedAction: action, reviewedBy: user, reviewedAt: new Date(), reviewComment: comment || null });
-        if (n) updated++;
+        if (n) { updated++; updatedIds.push(id); }
       }
 
       await this._writeAudit({
         eventType: 'ASSET_REVIEWED', performedBy: user, entityType: 'FlaggedAsset', entityId: flaggedAssetIds[0],
         details: `Bulk recommendation: ${action} applied to ${updated} of ${flaggedAssetIds.length} assets`,
       });
+
+      // Non-KEEP recommendations require admin approval — batch them and email admins.
+      if (action !== 'RECOMMENDED_KEEP' && updatedIds.length > 0) {
+        await this._createBatchAndNotify(updatedIds, user, req);
+      }
 
       return { updated };
     });
@@ -196,55 +209,9 @@ export default class MonitoringService extends cds.ApplicationService {
       const errors = [];
 
       for (const asset of assets) {
-        try {
-          const action = asset.recommendedAction || await this._getOriginalRecommendedAction(asset.ID);
-
-          let result;
-          if (action === 'RECOMMENDED_DELETE') {
-            result = await s4Integration.deleteAssetViaSICF(asset.companyCode, asset.masterFixedAsset, asset.fixedAsset);
-          } else if (action === 'RECOMMENDED_KEEP') {
-            result = { success: true, response: 'No S/4HANA action required — KEEP decision recorded' };
-          } else {
-            result = await s4Integration.blockAssetViaSICF(asset.companyCode, asset.masterFixedAsset, asset.fixedAsset);
-          }
-
-          await UPDATE(FlaggedAssets, asset.ID).with({
-            reviewStatus: 'EXECUTED',
-            writeBackStatus: 'SUCCESS',
-            writeBackTimestamp: new Date(),
-            writeBackSapResponse: result.response,
-          });
-
-          await this._writeAudit({ eventType: 'WRITEBACK_SUCCESS', performedBy: user, entityType: 'FlaggedAsset', entityId: asset.ID, details: `Write-back succeeded` });
-          cds.log('monitoring-service').info('M6.achieved: write-back complete — asset_id=%s, action=%s, status=SUCCESS', asset.ID, action);
-          executed++;
-
-        } catch (err) {
-          await UPDATE(FlaggedAssets, asset.ID).with({
-            reviewStatus: 'FAILED',
-            writeBackStatus: 'FAILED',
-            writeBackTimestamp: new Date(),
-            writeBackSapResponse: err.message,
-          });
-
-          errors.push({
-            assetId:          asset.ID,
-            companyCode:      asset.companyCode,
-            masterFixedAsset: asset.masterFixedAsset,
-            fixedAsset:       asset.fixedAsset,
-            bukrs:            err.bukrs          || asset.companyCode,
-            anln1:            err.anln1          || asset.masterFixedAsset,
-            anln2:            err.anln2          || asset.fixedAsset || '0',
-            messages:         err.messages       || err.message,
-            diagnosis:        err.diagnosis      || '',
-            systemResponse:   err.systemResponse || '',
-            procedure:        err.procedure      || '',
-          });
-
-          await this._writeAudit({ eventType: 'WRITEBACK_FAILED', performedBy: user, entityType: 'FlaggedAsset', entityId: asset.ID, details: `Write-back failed: ${err.message}` });
-          cds.log('monitoring-service').error('Write-back failed — asset_id=%s: %s', asset.ID, err.message);
-          failed++;
-        }
+        const outcome = await this._executeAsset(asset, user);
+        if (outcome.ok) executed++;
+        else { failed++; errors.push(outcome.error); }
       }
 
       return { executed, failed, errors };
@@ -365,6 +332,181 @@ export default class MonitoringService extends cds.ApplicationService {
       return { success: true };
     });
 
+    // -----------------------------------------------------------------------
+    // aiDiagnoseError — in-app AI diagnosis of a failed asset's S/4 write-back
+    // -----------------------------------------------------------------------
+    this.on('aiDiagnoseError', async (req) => {
+      if (!(await this._isAdmin(req))) return req.reject(403, 'Admin privilege required');
+      const { flaggedAssetId } = req.data;
+
+      const asset = await SELECT.one.from(FlaggedAssets)
+        .where({ ID: flaggedAssetId })
+        .columns('companyCode', 'masterFixedAsset', 'fixedAsset', 'writeBackSapResponse');
+      if (!asset) return req.reject(404, 'Flagged asset not found');
+
+      const text = await aiWriter.diagnoseError({
+        bukrs:    asset.companyCode,
+        anln1:    asset.masterFixedAsset,
+        anln2:    asset.fixedAsset || '0',
+        messages: asset.writeBackSapResponse || 'No error detail recorded',
+      });
+      return { text };
+    });
+
+    // -----------------------------------------------------------------------
+    // emailDecide — approve/cancel link clicked from the approval email.
+    // GET (OData function) → routed through the approuter's xsuaa route, so
+    // req.user is the acting (SSO-authenticated) admin. Returns an HTML page.
+    // -----------------------------------------------------------------------
+    this.on('emailDecide', async (req) => {
+      const res = req.http?.res;
+      const batchId  = req.data.batch;
+      const decision = String(req.data.decision || '').toLowerCase(); // 'approve' | 'cancel'
+
+      if (!(await this._isAdmin(req))) return this._htmlPage(res, 403, 'Access denied', '<p>You are not authorized to act on this request.</p>');
+      if (!batchId || !['approve', 'cancel'].includes(decision)) {
+        return this._htmlPage(res, 400, 'Invalid link', '<p>This approval link is malformed.</p>');
+      }
+
+      const admin = this._adminEmails(req)[0] || req.user?.id || 'admin';
+      const ApprovalBatches = 'assetmonitor.ApprovalBatches';
+
+      const batch = await SELECT.one.from(ApprovalBatches).where({ batchId });
+      if (!batch) return this._htmlPage(res, 404, 'Not found', '<p>This approval request no longer exists.</p>');
+
+      // Atomic single-winner claim.
+      const claimed = await UPDATE(ApprovalBatches)
+        .where({ batchId, decision: null })
+        .with({ decision: decision === 'approve' ? 'APPROVED' : 'CANCELLED', decidedBy: admin, decidedAt: new Date() });
+
+      if (!claimed) {
+        const fresh = await SELECT.one.from(ApprovalBatches).where({ batchId });
+        const verb  = fresh?.decision === 'CANCELLED' ? 'cancelled' : 'approved';
+        return this._htmlPage(res, 200, 'Already decided',
+          `<p>This batch was already <strong>${aiWriter.escapeHtml(verb)}</strong> by <strong>${aiWriter.escapeHtml(fresh?.decidedBy || 'another admin')}</strong>. No further action is needed.</p>`);
+      }
+
+      const assets = await SELECT.from(FlaggedAssets)
+        .where({ submissionBatch: batchId })
+        .columns('ID', 'reviewStatus', 'companyCode', 'masterFixedAsset', 'fixedAsset', 'assetDescription', 'recommendedAction');
+
+      if (decision === 'cancel') {
+        for (const a of assets) {
+          if (REC_STATUSES.includes(a.reviewStatus)) {
+            await UPDATE(FlaggedAssets, a.ID).with({ reviewStatus: 'REJECTED', reviewComment: `Cancelled via email by ${admin}` });
+            await this._writeAudit({ eventType: 'ACTION_REJECTED', performedBy: admin, entityType: 'FlaggedAsset', entityId: a.ID, details: `Cancelled via email` });
+          }
+        }
+        await UPDATE(ApprovalBatches).where({ batchId }).with({ resultSummary: `Cancelled by ${admin}` });
+        await this._notifyOtherAdmins(batch, admin, 'CANCELLED', req).catch(() => {});
+        await this._notifyRequester(batch, admin, 'CANCELLED', 'Your recommendation was cancelled.', req).catch(() => {});
+        return this._htmlPage(res, 200, 'Cancelled',
+          `<p>You have <strong>cancelled</strong> ${assets.length} recommendation(s) from <strong>${aiWriter.escapeHtml(batch.requestedBy)}</strong>. The requester and other admins have been notified.</p>`);
+      }
+
+      // approve → mark APPROVED + execute S/4 write-back for each asset
+      let executed = 0, failed = 0;
+      const failures = [];
+      for (const a of assets) {
+        if (!REC_STATUSES.includes(a.reviewStatus)) continue;
+        await UPDATE(FlaggedAssets, a.ID).with({ reviewStatus: 'APPROVED', approvedBy: admin, approvedAt: new Date() });
+        await this._writeAudit({ eventType: 'ACTION_APPROVED', performedBy: admin, entityType: 'FlaggedAsset', entityId: a.ID, details: `Approved via email` });
+
+        const fresh = { ...a, reviewStatus: 'APPROVED' };
+        const outcome = await this._executeAsset(fresh, admin);
+        if (outcome.ok) executed++;
+        else { failed++; failures.push(outcome.error); }
+      }
+
+      const summary = `Approved by ${admin}: ${executed} executed, ${failed} failed`;
+      await UPDATE(ApprovalBatches).where({ batchId }).with({ resultSummary: summary });
+      await this._notifyOtherAdmins(batch, admin, 'APPROVED', req).catch(() => {});
+
+      if (failed === 0) {
+        await this._notifyRequester(batch, admin, 'APPROVED',
+          `Your recommendation was approved and executed in S/4HANA (${executed} asset(s)).`, req).catch(() => {});
+      } else {
+        // Error path: leave failed assets FAILED; email admins with the two action buttons.
+        // The requester is NOT auto-notified — an admin decides via "Notify requester & reject".
+        for (const f of failures) {
+          await this._notifyAdminsError(batch, admin, f, req).catch(() => {});
+        }
+      }
+
+      const okLine = `<p>You <strong>approved</strong> the batch from <strong>${aiWriter.escapeHtml(batch.requestedBy)}</strong>. <strong>${executed}</strong> action(s) executed in S/4HANA.</p>`;
+      const failLine = failed > 0
+        ? `<p style="color:#b91c1c;"><strong>${failed}</strong> action(s) failed. Administrators have been emailed the error details with options to diagnose or reject.</p>`
+        : `<p>The requester and other administrators have been notified.</p>`;
+      return this._htmlPage(res, 200, 'Approved', okLine + failLine);
+    });
+
+    // -----------------------------------------------------------------------
+    // emailAiDiagnose — "Send to AI" button on an error email. Admin-guarded.
+    // -----------------------------------------------------------------------
+    this.on('emailAiDiagnose', async (req) => {
+      const res = req.http?.res;
+      const { batch: batchId, asset: assetId } = req.data;
+
+      if (!(await this._isAdmin(req))) return this._htmlPage(res, 403, 'Access denied', '<p>You are not authorized.</p>');
+
+      const asset = await SELECT.one.from(FlaggedAssets)
+        .where({ ID: assetId })
+        .columns('companyCode', 'masterFixedAsset', 'fixedAsset', 'writeBackSapResponse');
+      if (!asset) return this._htmlPage(res, 404, 'Not found', '<p>Asset not found.</p>');
+
+      const text = await aiWriter.diagnoseError({
+        bukrs:    asset.companyCode,
+        anln1:    asset.masterFixedAsset,
+        anln2:    asset.fixedAsset || '0',
+        messages: asset.writeBackSapResponse || 'No error detail recorded',
+      });
+
+      const bodyHtml = aiWriter.escapeHtml(text).replace(/\n/g, '<br>');
+      return this._htmlPage(res, 200, 'AI diagnosis',
+        `<p style="margin:0 0 12px;color:#64748b;">Asset ${aiWriter.escapeHtml(asset.companyCode)}/${aiWriter.escapeHtml(asset.masterFixedAsset)}/${aiWriter.escapeHtml(asset.fixedAsset || '0')}</p>` +
+        `<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;line-height:1.5;">${bodyHtml}</div>`);
+    });
+
+    // -----------------------------------------------------------------------
+    // emailRejectNotify — "Notify requester & reject" button on an error email.
+    // Marks the failed asset REJECTED and emails the requester. Idempotent.
+    // -----------------------------------------------------------------------
+    this.on('emailRejectNotify', async (req) => {
+      const res = req.http?.res;
+      const { batch: batchId, asset: assetId } = req.data;
+
+      if (!(await this._isAdmin(req))) return this._htmlPage(res, 403, 'Access denied', '<p>You are not authorized.</p>');
+
+      const admin = this._adminEmails(req)[0] || req.user?.id || 'admin';
+      const ApprovalBatches = 'assetmonitor.ApprovalBatches';
+
+      const asset = await SELECT.one.from(FlaggedAssets)
+        .where({ ID: assetId })
+        .columns('ID', 'reviewStatus', 'companyCode', 'masterFixedAsset', 'fixedAsset', 'writeBackSapResponse');
+      if (!asset) return this._htmlPage(res, 404, 'Not found', '<p>Asset not found.</p>');
+
+      if (asset.reviewStatus === 'REJECTED') {
+        return this._htmlPage(res, 200, 'Already sent', '<p>The requester has already been notified and this recommendation was rejected.</p>');
+      }
+
+      await UPDATE(FlaggedAssets, asset.ID).with({
+        reviewStatus:  'REJECTED',
+        reviewComment: `Rejected via email by ${admin} after S/4HANA error`,
+      });
+      await this._writeAudit({ eventType: 'ACTION_REJECTED', performedBy: admin, entityType: 'FlaggedAsset', entityId: asset.ID, details: `Rejected via email after write-back error` });
+
+      const batch = await SELECT.one.from(ApprovalBatches).where({ batchId });
+      await this._notifyRequesterError(batch, {
+        bukrs:    asset.companyCode,
+        anln1:    asset.masterFixedAsset,
+        anln2:    asset.fixedAsset || '0',
+        messages: asset.writeBackSapResponse || 'Unknown error',
+      }, req).catch(() => {});
+
+      return this._htmlPage(res, 200, 'Requester notified',
+        `<p>Asset <strong>${aiWriter.escapeHtml(asset.companyCode)}/${aiWriter.escapeHtml(asset.masterFixedAsset)}</strong> was rejected and the requester has been notified of the error.</p>`);
+    });
+
     // One-time purge of demo seed data — idempotent (no-op if already gone)
     cds.on('served', async () => {
       try {
@@ -455,5 +597,221 @@ export default class MonitoringService extends cds.ApplicationService {
     if (entry?.details?.includes('RECOMMENDED_DELETE')) return 'RECOMMENDED_DELETE';
     if (entry?.details?.includes('RECOMMENDED_KEEP'))   return 'RECOMMENDED_KEEP';
     return 'RECOMMENDED_BLOCK'; // safe default
+  }
+
+  // -------------------------------------------------------------------------
+  // Shared S/4 write-back for a single asset (used by executeApprovedActions
+  // and the email approve path). Never throws — returns {ok, error?}.
+  // Expects `asset` with reviewStatus already APPROVED.
+  // -------------------------------------------------------------------------
+  async _executeAsset(asset, user) {
+    const { FlaggedAssets } = this.entities;
+    try {
+      const action = asset.recommendedAction || await this._getOriginalRecommendedAction(asset.ID);
+
+      let result;
+      if (action === 'RECOMMENDED_DELETE') {
+        result = await s4Integration.deleteAssetViaSICF(asset.companyCode, asset.masterFixedAsset, asset.fixedAsset);
+      } else if (action === 'RECOMMENDED_KEEP') {
+        result = { success: true, response: 'No S/4HANA action required — KEEP decision recorded' };
+      } else {
+        result = await s4Integration.blockAssetViaSICF(asset.companyCode, asset.masterFixedAsset, asset.fixedAsset);
+      }
+
+      await UPDATE(FlaggedAssets, asset.ID).with({
+        reviewStatus: 'EXECUTED',
+        writeBackStatus: 'SUCCESS',
+        writeBackTimestamp: new Date(),
+        writeBackSapResponse: result.response,
+      });
+
+      await this._writeAudit({ eventType: 'WRITEBACK_SUCCESS', performedBy: user, entityType: 'FlaggedAsset', entityId: asset.ID, details: `Write-back succeeded` });
+      cds.log('monitoring-service').info('M6.achieved: write-back complete — asset_id=%s, action=%s, status=SUCCESS', asset.ID, action);
+      return { ok: true };
+
+    } catch (err) {
+      await UPDATE(FlaggedAssets, asset.ID).with({
+        reviewStatus: 'FAILED',
+        writeBackStatus: 'FAILED',
+        writeBackTimestamp: new Date(),
+        writeBackSapResponse: err.messages || err.message,
+      });
+
+      await this._writeAudit({ eventType: 'WRITEBACK_FAILED', performedBy: user, entityType: 'FlaggedAsset', entityId: asset.ID, details: `Write-back failed: ${err.message}` });
+      cds.log('monitoring-service').error('Write-back failed — asset_id=%s: %s', asset.ID, err.message);
+
+      return {
+        ok: false,
+        error: {
+          assetId:          asset.ID,
+          companyCode:      asset.companyCode,
+          masterFixedAsset: asset.masterFixedAsset,
+          fixedAsset:       asset.fixedAsset,
+          bukrs:            err.bukrs          || asset.companyCode,
+          anln1:            err.anln1          || asset.masterFixedAsset,
+          anln2:            err.anln2          || asset.fixedAsset || '0',
+          messages:         err.messages       || err.message,
+          diagnosis:        err.diagnosis      || '',
+          systemResponse:   err.systemResponse || '',
+          procedure:        err.procedure      || '',
+        },
+      };
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Approval-batch + email helpers
+  // -------------------------------------------------------------------------
+
+  /** Union of BOOTSTRAP_ADMINS + AdminUsers emails, lowercased & unique. */
+  async _adminEmailList() {
+    const AdminUsers = 'assetmonitor.AdminUsers';
+    let rows = [];
+    try { rows = await SELECT.from(AdminUsers).columns('email'); } catch { /* table may be empty */ }
+    const all = [...BOOTSTRAP_ADMINS, ...rows.map(r => r.email)]
+      .filter(Boolean)
+      .map(e => String(e).trim().toLowerCase());
+    return [...new Set(all)];
+  }
+
+  /**
+   * Resolve the approuter's public base URL for building email links.
+   * APP_BASE_URL env → forwarded headers of the triggering request → localhost.
+   * Caches the first non-localhost value it derives.
+   */
+  _baseUrl(req) {
+    if (process.env.APP_BASE_URL) return process.env.APP_BASE_URL.replace(/\/+$/, '');
+    if (this._cachedBaseUrl) return this._cachedBaseUrl;
+    const h = req?.http?.req?.headers || {};
+    const proto = h['x-forwarded-proto'] || 'https';
+    const host  = h['x-forwarded-host']  || h.host;
+    if (host) {
+      const url = `${proto}://${host}`.replace(/\/+$/, '');
+      this._cachedBaseUrl = url;
+      return url;
+    }
+    return 'http://localhost:4004';
+  }
+
+  /** OData function invocation URL on the monitoring service. */
+  _fnUrl(req, fn, params) {
+    const qs = Object.entries(params)
+      .map(([k, v]) => `${k}='${encodeURIComponent(String(v))}'`)
+      .join(',');
+    return `${this._baseUrl(req)}/monitoring/${fn}(${qs})`;
+  }
+
+  /** Create an ApprovalBatches row, stamp assets, and email admins. Never throws. */
+  async _createBatchAndNotify(assetIds, requestedBy, req) {
+    const { FlaggedAssets } = this.entities;
+    const ApprovalBatches = 'assetmonitor.ApprovalBatches';
+    const batchId = cds.utils.uuid();
+    try {
+      await INSERT.into(ApprovalBatches).entries({
+        batchId,
+        requestedBy: requestedBy,
+        createdAt:   new Date(),
+        assetCount:  assetIds.length,
+        decision:    null,
+      });
+      for (const id of assetIds) {
+        await UPDATE(FlaggedAssets, id).with({ submissionBatch: batchId });
+      }
+      await this._sendApprovalEmail(batchId, req);
+    } catch (err) {
+      cds.log('monitoring-service').error('Approval email/batch failed (submission still saved): %s', err.message);
+    }
+  }
+
+  /** Build asset rows as an HTML list for emails. */
+  _assetLinesHtml(assets) {
+    const label = (a) => a.recommendedAction === 'RECOMMENDED_DELETE' ? 'DELETE'
+                       : a.recommendedAction === 'RECOMMENDED_KEEP'   ? 'KEEP' : 'BLOCK';
+    return '<ul style="margin:0 0 12px;padding-left:18px;">' + assets.map(a =>
+      `<li style="margin:0 0 4px;">${aiWriter.escapeHtml(a.companyCode)}/${aiWriter.escapeHtml(a.masterFixedAsset)}` +
+      `${a.fixedAsset ? '/' + aiWriter.escapeHtml(a.fixedAsset) : ''} — ${aiWriter.escapeHtml(a.assetDescription || 'no description')} ` +
+      `<strong>(${label(a)})</strong></li>`).join('') + '</ul>';
+  }
+
+  /** Compose + send the batched approval-request email to all admins. */
+  async _sendApprovalEmail(batchId, req) {
+    const { FlaggedAssets } = this.entities;
+    const ApprovalBatches = 'assetmonitor.ApprovalBatches';
+
+    const batch  = await SELECT.one.from(ApprovalBatches).where({ batchId });
+    const assets = await SELECT.from(FlaggedAssets).where({ submissionBatch: batchId })
+      .columns('companyCode', 'masterFixedAsset', 'fixedAsset', 'assetDescription', 'recommendedAction');
+    const admins = await this._adminEmailList();
+    if (admins.length === 0) return;
+
+    const framed = await aiWriter.frameEmail('APPROVAL_REQUEST', {
+      requestedBy: batch.requestedBy,
+      count:       assets.length,
+      assets,
+    });
+
+    const approveUrl = this._fnUrl(req, 'emailDecide', { batch: batchId, decision: 'approve' });
+    const cancelUrl  = this._fnUrl(req, 'emailDecide', { batch: batchId, decision: 'cancel' });
+    const buttons = emailService.button(approveUrl, 'Approve all', '#16a34a') +
+                    emailService.button(cancelUrl,  'Cancel',      '#dc2626');
+
+    const html = emailService.htmlShell(framed.subject, framed.bodyHtml + this._assetLinesHtml(assets), buttons);
+    await emailService.sendHtmlEmail({ to: admins, subject: framed.subject, html });
+  }
+
+  /** Email all admins EXCEPT the one who decided, that the batch was decided. */
+  async _notifyOtherAdmins(batch, decidedBy, decision, req) {
+    const admins = (await this._adminEmailList()).filter(e => e !== String(decidedBy).toLowerCase());
+    if (admins.length === 0) return;
+    const framed = await aiWriter.frameEmail('DECISION_NOTICE', {
+      decidedBy, decision, requestedBy: batch.requestedBy, count: batch.assetCount,
+    });
+    const html = emailService.htmlShell(framed.subject, framed.bodyHtml);
+    await emailService.sendHtmlEmail({ to: admins, subject: framed.subject, html });
+  }
+
+  /** Email the requester the outcome (approved+executed or cancelled). */
+  async _notifyRequester(batch, decidedBy, decision, resultSummary, req) {
+    if (!batch?.requestedBy) return;
+    const kind = decision === 'CANCELLED' ? 'DECISION_NOTICE' : 'APPROVED_RESULT';
+    const framed = await aiWriter.frameEmail(kind, {
+      decidedBy, decision, requestedBy: batch.requestedBy, count: batch.assetCount, resultSummary,
+    });
+    const html = emailService.htmlShell(framed.subject, framed.bodyHtml);
+    await emailService.sendHtmlEmail({ to: batch.requestedBy, subject: framed.subject, html });
+  }
+
+  /** Email the requester that their recommendation errored and was rejected. */
+  async _notifyRequesterError(batch, errCtx, req) {
+    if (!batch?.requestedBy) return;
+    const framed = await aiWriter.frameEmail('REQUESTER_ERROR', {
+      requestedBy: batch.requestedBy, ...errCtx,
+    });
+    const html = emailService.htmlShell(framed.subject, framed.bodyHtml);
+    await emailService.sendHtmlEmail({ to: batch.requestedBy, subject: framed.subject, html });
+  }
+
+  /** Email all admins that a write-back failed, with Send-to-AI + Reject buttons. */
+  async _notifyAdminsError(batch, decidedBy, errCtx, req) {
+    const admins = await this._adminEmailList();
+    if (admins.length === 0) return;
+    const framed = await aiWriter.frameEmail('EXECUTION_ERROR', {
+      decidedBy, requestedBy: batch.requestedBy, ...errCtx,
+    });
+    const aiUrl     = this._fnUrl(req, 'emailAiDiagnose',  { batch: batch.batchId, asset: errCtx.assetId });
+    const rejectUrl = this._fnUrl(req, 'emailRejectNotify', { batch: batch.batchId, asset: errCtx.assetId });
+    const buttons = emailService.button(aiUrl, 'Send to AI', '#2563eb') +
+                    emailService.button(rejectUrl, 'Notify requester &amp; reject', '#dc2626');
+    const html = emailService.htmlShell(framed.subject, framed.bodyHtml, buttons);
+    await emailService.sendHtmlEmail({ to: admins, subject: framed.subject, html });
+  }
+
+  /** Write a branded HTML confirmation page to the HTTP response and end it. */
+  _htmlPage(res, status, title, bodyHtml) {
+    const html = emailService.htmlShell(title, bodyHtml);
+    if (res) {
+      res.status(status).set('Content-Type', 'text/html; charset=utf-8').send(html);
+    }
+    return html;
   }
 }

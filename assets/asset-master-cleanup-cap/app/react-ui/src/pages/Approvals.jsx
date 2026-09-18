@@ -45,6 +45,9 @@ export default function Approvals({ onBadgeRefresh, isAdmin }) {
   const [rejectId,     setRejectId]     = useState(null)
   const [rejectReason, setRejectReason] = useState('')
 
+  const [aiResult,  setAiResult]  = useState({})   // { [assetId]: text }
+  const [aiLoading, setAiLoading] = useState({})   // { [assetId]: bool }
+
   const loadData = useCallback(async () => {
     setLoading(true)
     try {
@@ -83,9 +86,17 @@ export default function Approvals({ onBadgeRefresh, isAdmin }) {
     setTimeout(() => setDeleteError(null), 400)
   }
 
-  const onSendToAI = (assetData, errorData, procedureData) => {
-    console.log('[SendToAI] asset:', assetData, 'error:', errorData, 'procedure:', procedureData)
-    // AI integration will be connected here later
+  const onSendToAI = async (assetId) => {
+    if (!assetId) { setAlert({ type: 'error', msg: 'Cannot diagnose: asset id missing.' }); return }
+    setAiLoading(prev => ({ ...prev, [assetId]: true }))
+    try {
+      const text = await api.aiDiagnoseError(assetId)
+      setAiResult(prev => ({ ...prev, [assetId]: text || 'No diagnosis returned.' }))
+    } catch (e) {
+      setAiResult(prev => ({ ...prev, [assetId]: `AI diagnosis failed: ${e.message}` }))
+    } finally {
+      setAiLoading(prev => ({ ...prev, [assetId]: false }))
+    }
   }
 
   const pendingSelected  = [...selected].filter(id => assets.find(a => a.ID === id && REC_STATUSES.includes(a.reviewStatus))).length
@@ -249,26 +260,25 @@ export default function Approvals({ onBadgeRefresh, isAdmin }) {
                   </div>
                 )
               })()}
+
+              {(aiLoading[errItem.assetId] || aiResult[errItem.assetId]) && (
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 12.5, color: '#7c3aed', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 6 }}>AI Diagnosis</div>
+                  <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: 10, background: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: 6, padding: '10px 12px', fontSize: 13.5, color: '#374151', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+                    {aiLoading[errItem.assetId] ? 'Analyzing the error with AI…' : aiResult[errItem.assetId]}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div style={{ padding: '12px 18px', borderTop: '1px solid #e2e8f0', display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
               <button
                 className="btn btn-primary"
                 style={{ background: '#7c3aed', borderColor: '#7c3aed' }}
-                onClick={() => {
-                  const p = parseProcedureText(errItem.procedure)
-                  onSendToAI(
-                    { bukrs: errItem.bukrs, anln1: errItem.anln1, anln2: errItem.anln2 },
-                    { messages: errItem.messages },
-                    {
-                      diagnosis:      errItem.diagnosis      || p.diagnosis,
-                      systemResponse: errItem.systemResponse || p.systemResponse,
-                      procedure:      p.procedure,
-                    }
-                  )
-                }}
+                disabled={aiLoading[errItem.assetId]}
+                onClick={() => onSendToAI(errItem.assetId)}
               >
-                Send to AI
+                {aiLoading[errItem.assetId] ? 'Analyzing…' : 'Send to AI'}
               </button>
               <button className="btn btn-secondary" onClick={closeDeleteError}>Close</button>
             </div>

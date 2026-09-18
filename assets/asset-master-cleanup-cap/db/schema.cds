@@ -71,6 +71,7 @@ entity FlaggedAssets : cuid {
   aiReasoningSummary       : String(500);
   aiConfidenceScore        : Decimal(3,2);
   recommendedAction        : String(20);   // RECOMMENDED_BLOCK | RECOMMENDED_DELETE | RECOMMENDED_KEEP (survives APPROVE)
+  submissionBatch          : String(36);   // links the asset to the ApprovalBatches row emailed to admins
 }
 
 // ---------------------------------------------------------------------------
@@ -103,4 +104,19 @@ entity AdminUsers {
   key email : String(200);
   addedBy   : String(200);
   addedAt   : Timestamp;
+}
+
+// ---------------------------------------------------------------------------
+// Approval batches — one row per recommendation submission emailed to admins.
+// The email Approve/Cancel buttons carry batchId; a single decision claims it.
+// ---------------------------------------------------------------------------
+entity ApprovalBatches {
+  key batchId   : String(36);
+  requestedBy   : String(200);   // accountant email (reviewedBy) who submitted
+  createdAt     : Timestamp;
+  assetCount    : Integer;
+  decision      : String(20);    // null (pending) | APPROVED | CANCELLED
+  decidedBy     : String(200);
+  decidedAt     : Timestamp;
+  resultSummary : String(1000);
 }

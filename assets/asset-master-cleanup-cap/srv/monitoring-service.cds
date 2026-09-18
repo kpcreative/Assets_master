@@ -85,4 +85,22 @@ service MonitoringService @(path: '/monitoring') {
 
   /** Remove an admin by email (admin only) */
   action removeAdmin(email: String) returns { success: Boolean };
+
+  /** AI-framed diagnosis of a failed asset's S/4HANA write-back error (admin only) */
+  action aiDiagnoseError(flaggedAssetId: UUID) returns { text: String };
+
+  // -------------------------------------------------------------------------
+  // Email-link endpoints (GET functions — clicked from approval/error emails).
+  // Routed through the approuter's xsuaa route so req.user is the acting admin.
+  // Each writes a branded HTML confirmation page to the HTTP response.
+  // -------------------------------------------------------------------------
+
+  /** Approve/cancel an approval batch from the email buttons */
+  function emailDecide(batch: String, decision: String) returns String;
+
+  /** "Send to AI" button on an error email — returns an AI diagnosis page */
+  function emailAiDiagnose(batch: String, asset: String) returns String;
+
+  /** "Notify requester & reject" button on an error email */
+  function emailRejectNotify(batch: String, asset: String) returns String;
 }

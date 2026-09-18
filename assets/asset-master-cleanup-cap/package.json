@@ -6,6 +6,7 @@
     "@cap-js/hana": "^3",
     "@sap/cds": "^10",
     "@sap/xssec": "^4",
+    "nodemailer": "^6.9.14",
     "undici": "^8.10.0"
   },
   "devDependencies": {
